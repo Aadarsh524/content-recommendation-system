@@ -1,0 +1,13 @@
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+scikit-learn
+implicit
+fastapi
+uvicorn
+torch
+annoy
+redis
+sqlalchemy
