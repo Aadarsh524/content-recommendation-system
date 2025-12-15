@@ -4,7 +4,7 @@ from scipy.sparse import csr_matrix
 
 
 class ALSRecommender:
-    def __init__(self, factors=128, regularization=0.1, iterations=20):
+    def __init__(self, factors=20, regularization=0.1, iterations=25):
         # ✅ MODEL MUST BE INITIALISED HERE
         self.model = AlternatingLeastSquares(
             factors=factors,

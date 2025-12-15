@@ -1,120 +1,53 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
-import torch.nn as nn
+from torch.utils.data import DataLoader
 import torch.optim as optim
-import numpy as np
-import pandas as pd
+import pickle
+from pathlib import Path
 
 from src.models.ncf import NCF
+from src.models.bpr_dataset import BPRDataset
+from src.data.load_data import load_train_val_test
 from src.evaluation.evaluate import evaluate_model
 from src.models.baseline import train_popularity_model
-from src.data.load_data import load_train_val_test
+from src.config import TRAINED_MODEL
 
-# ============================
-# Dataset with negative sampling
-# ============================
-class NCFDataset(Dataset):
-    def __init__(self, user_item_dict, n_items, neg_samples=32):
-        self.user_item_dict = user_item_dict
-        self.users = list(user_item_dict.keys())
-        self.n_items = n_items
-        self.neg_samples = neg_samples
-        self.data = []
-        self.prepare_data()
 
-    def prepare_data(self):
-        for u, pos_items in self.user_item_dict.items():
-            for i in pos_items:
-                self.data.append((u, i, 1))
-                # negative sampling
-                neg_candidates = [j for j in range(self.n_items) if j not in pos_items]
-                if len(neg_candidates) == 0:
-                    continue
-                neg_items = np.random.choice(
-                    neg_candidates,
-                    size=min(self.neg_samples, len(neg_candidates)),
-                    replace=len(neg_candidates) < self.neg_samples
-                )
-                for j in neg_items:
-                    self.data.append((u, j, 0))
+import torch
+import torch.nn.functional as F
 
-    def __len__(self):
-        return len(self.data)
+def bpr_loss(pos_scores, neg_scores):
+    return -torch.mean(F.logsigmoid(pos_scores - neg_scores))
 
-    def __getitem__(self, idx):
-        u, i, r = self.data[idx]
-        return torch.tensor(u, dtype=torch.long), torch.tensor(i, dtype=torch.long), torch.tensor(r, dtype=torch.float)
-
-# ============================
-# Encode IDs to 0-index
-# ============================
-def encode_ids(df):
-    user2idx = {u: i for i, u in enumerate(df['user_id'].unique())}
-    item2idx = {i: j for j, i in enumerate(df['item_id'].unique())}
-    df = df.copy()
-    df['user_id'] = df['user_id'].map(user2idx)
-    df['item_id'] = df['item_id'].map(item2idx)
-    return df, user2idx, item2idx
 
 def build_user_items(df):
     return df.groupby("user_id")["item_id"].apply(set).to_dict()
 
-# ============================
-# Train NCF
-# ============================
-def train_ncf_model(train_user_items, n_users, n_items, embedding_dim=32, hidden_layers=[64,32,16], epochs=5, lr=0.001, device='cpu'):
-    dataset = NCFDataset(train_user_items, n_items)
-    loader = DataLoader(dataset, batch_size=512, shuffle=True)
 
-    model = NCF(n_users, n_items, embedding_dim=embedding_dim, hidden_layers=hidden_layers).to(device)
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+def encode_ids(df):
+    user2idx = {u: i for i, u in enumerate(df["user_id"].unique())}
+    item2idx = {i: j for j, i in enumerate(df["item_id"].unique())}
 
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0
-        for u, i, r in loader:
-            u, i, r = u.to(device), i.to(device), r.to(device)
-            optimizer.zero_grad()
-            pred = model(u, i)
-            loss = criterion(pred, r)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(loader):.4f}")
-    return model
+    df = df.copy()
+    df["user_id"] = df["user_id"].map(user2idx)
+    df["item_id"] = df["item_id"].map(item2idx)
+    return df, user2idx, item2idx
 
-# ============================
-# Recommendation function
-# ============================
-def recommend_ncf(model, user_id, seen_items, n_items, topk=10, device='cpu'):
-    model.eval()
-    all_items = torch.tensor([i for i in range(n_items) if i not in seen_items], dtype=torch.long).to(device)
-    if len(all_items) == 0:
-        return []
-    user = torch.tensor([user_id]*len(all_items), dtype=torch.long).to(device)
-    with torch.no_grad():
-        scores = model(user, all_items)
-    topk_idx = torch.topk(scores, k=min(topk, len(scores)))[1]
-    recommended = all_items[topk_idx].cpu().numpy()
-    return recommended.tolist()
 
-# ============================
-# Full training pipeline
-# ============================
-def train_ncf(epochs=5, embedding_dim=64, hidden_layers=[64,32,16], device='cpu'):
-    train, val, test = load_train_val_test()
+def train_bpr_ncf(
+    epochs=50,
+    embedding_dim=64,
+    hidden_layers=[128, 64],
+    lr=1e-3,
+    batch_size=1024,
+    device="cpu",
+):
+    train, _, test = load_train_val_test()
 
-    # Encode train
     train, user2idx, item2idx = encode_ids(train)
-
-    # Map test safely, drop unknown users/items
     test = test.copy()
-    test['user_id'] = test['user_id'].map(user2idx)
-    test['item_id'] = test['item_id'].map(item2idx)
-    test = test.dropna(subset=['user_id','item_id'])
-    test['user_id'] = test['user_id'].astype(int)
-    test['item_id'] = test['item_id'].astype(int)
+    test["user_id"] = test["user_id"].map(user2idx)
+    test["item_id"] = test["item_id"].map(item2idx)
+    test = test.dropna().astype(int)
 
     train_user_items = build_user_items(train)
     test_user_items = build_user_items(test)
@@ -122,28 +55,88 @@ def train_ncf(epochs=5, embedding_dim=64, hidden_layers=[64,32,16], device='cpu'
     n_users = len(user2idx)
     n_items = len(item2idx)
 
-    model = train_ncf_model(train_user_items, n_users, n_items,
-                            embedding_dim=embedding_dim,
-                            hidden_layers=hidden_layers,
-                            epochs=epochs,
-                            device=device)
+    dataset = BPRDataset(train_user_items, n_items)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Popular items for cold-start
-    popular_items = train_popularity_model(train)  # expects DataFrame
+    model = NCF(
+        n_users,
+        n_items,
+        embedding_dim=embedding_dim,
+        hidden_layers=hidden_layers,
+    ).to(device)
 
-    # Evaluation
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+
+        for u, i_pos, i_neg in loader:
+            u = u.to(device)
+            i_pos = i_pos.to(device)
+            i_neg = i_neg.to(device)
+
+            optimizer.zero_grad()
+
+            pos_scores = model(u, i_pos)
+            neg_scores = model(u, i_neg)
+
+            loss = bpr_loss(pos_scores, neg_scores)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        print(f"Epoch {epoch+1}/{epochs}, BPR Loss: {total_loss/len(loader):.4f}")
+
+    # Save artifacts
+    Path(TRAINED_MODEL).mkdir(parents=True, exist_ok=True)
+    with open(f"{TRAINED_MODEL}/ncf_bpr.pkl", "wb") as f:
+        pickle.dump(
+            {
+                "model": model,
+                "user2idx": user2idx,
+                "item2idx": item2idx,
+                "n_items": n_items,
+                "train_user_items": train_user_items,
+            },
+            f,
+        )
+
+    popular_items = train_popularity_model(train)
+
     def recommend_fn(user_id, seen_items, k=10):
         if user_id not in train_user_items:
             return popular_items[:k]
-        return recommend_ncf(model, user_id, seen_items, n_items, topk=k, device=device)
 
-    results = evaluate_model(recommend_fn, test_user_items, train_user_items, k=10)
-    print("NCF Results:", results)
+        model.eval()
+        candidates = [
+            i for i in range(n_items) if i not in seen_items
+        ]
+        user_tensor = torch.tensor([user_id] * len(candidates)).to(device)
+        item_tensor = torch.tensor(candidates).to(device)
 
-# ============================
-# Run
-# ============================
+        with torch.no_grad():
+            scores = model(user_tensor, item_tensor)
+
+        topk_idx = torch.topk(scores, k=min(k, len(scores))).indices
+        return [candidates[i] for i in topk_idx.cpu().numpy()]
+
+    results = evaluate_model(
+        recommend_fn,
+        test_user_items,
+        train_user_items,
+        k=10,
+    )
+
+    print("🔥 BPR-NCF Results:", results)
+
+
 if __name__ == "__main__":
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    # Final training: 50 epochs, larger embeddings
-    train_ncf(epochs=100, embedding_dim=256, hidden_layers=[256,128,64], device=device)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    train_bpr_ncf(
+        epochs=50,
+        embedding_dim=64,
+        hidden_layers=[128, 64],
+        device=device,
+    )

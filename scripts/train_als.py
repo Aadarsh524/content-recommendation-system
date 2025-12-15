@@ -18,7 +18,7 @@ test_user_items = build_user_items(test)
 popular_items = train_popularity_model(train)
 
 # Train ALS
-als = ALSRecommender(factors=50, iterations=20)
+als = ALSRecommender()
 als.fit(train)
 
 print("ALS matrix shape:", als.user_item_matrix.shape)
