@@ -7,6 +7,11 @@ from src.models.als import ALSRecommender
 from src.models.baseline import train_popularity_model
 from src.config import TRAINED_MODEL
 
+from src.serving.schemas import SimilarRequest, SimilarResponse
+from src.serving.cache import get_cache, set_cache
+
+
+
 app = FastAPI(title="ALS Recommendation API")
 
 # Load artifacts for ALS
@@ -48,37 +53,38 @@ idx2item = {v: k for k, v in item2idx.items()}
 
 # API Endpoint
 
-@app.get("/")
-def health_check():
-    return {"status": "ok", "service": "recommendation-api"}
-
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.post("/recommend/als", response_model=RecommendResponse)
 def recommend_als(req: RecommendRequest):
     try:
-        if req.user_id not in user_item_map:
-            return RecommendResponse(
-                user_id=req.user_id,
-                recommendations=popular_items[:req.k],
-                model="ALS"
-            )
+        cache_key = f"als:{req.user_id}:{req.k}"
+        cached = get_cache(cache_key)
+        if cached:
+            return cached  # already dict → FastAPI ok
 
         recs = als_model.recommend(
             user_id=req.user_id,
+            N=req.k,
+            popular_items=popular_items
         )
 
-        return RecommendResponse(
+        response = RecommendResponse(
             user_id=req.user_id,
             recommendations=recs,
             model="ALS"
         )
 
+        set_cache(cache_key, response.dict())
+        return response
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Recommendation failed: {str(e)}")
-
-
-
-
+        raise HTTPException(
+            status_code=500,
+            detail=f"ALS recommendation failed: {str(e)}"
+        )
 
 
 @app.post("/recommend/ncf", response_model=RecommendResponse)
@@ -127,4 +133,26 @@ def recommend_ncf(req: RecommendRequest):
         raise HTTPException(
             status_code=500,
             detail=f"NCF recommendation failed: {str(e)}"
+        )
+    
+
+
+
+@app.post("/similar", response_model=SimilarResponse)
+def similar_items(req: SimilarRequest):
+    try:
+        items = als_model.similar_items(
+            item_id=req.item_id,
+            N=req.k
+        )
+
+        return SimilarResponse(
+            item_id=req.item_id,
+            similar_items=items
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Similar items failed: {str(e)}"
         )

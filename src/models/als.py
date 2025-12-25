@@ -56,3 +56,14 @@ class ALSRecommender:
         )
 
         return [self.reverse_item_map[i] for i in item_ids]
+    def similar_items(self, item_id, N=10):
+        if item_id not in self.item_map:
+            return []
+    
+        item_idx = self.item_map[item_id]
+    
+        similar_idxs, _ = self.model.similar_items(item_idx, N=N+1)
+        similar_idxs = similar_idxs[1:]  # remove itself
+    
+        return [self.reverse_item_map[i] for i in similar_idxs]
+
